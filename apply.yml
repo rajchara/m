@@ -40,6 +40,9 @@ on:
       databricks_workspace_endpoint_id:
         required: false
         type: string
+      databricks_workspace_id:
+        required: false
+        type: string
       databricks_workspace_url:
         required: false
         type: string
@@ -71,25 +74,34 @@ on:
         required: false
 
     outputs:
-      aws_databricks_workspace_url:
-        description: "AWS Databricks URL"
-        value: ${{ jobs.aws-terraform-apply.outputs.databricks_workspace_url }}
-      azure_databricks_workspace_url:
-        description: "Azure Databricks URL"
-        value: ${{ jobs.azure-terraform-apply.outputs.databricks_workspace_url }}
+      aws_databricks_workspace_id:
+        description: "AWS Databricks id"
+        value: ${{ jobs.aws-terraform-apply.outputs.databricks_workspace_id }}
+      azure_databricks_workspace_id:
+        description: "Azure Databricks id"
+        value: ${{ jobs.azure-terraform-apply.outputs.databricks_workspace_id }}
+      databricks_workspace_id:
+        description: "Databricks Workspace ID (AWS or Azure)"
+        value: ${{ inputs.cloud == 'aws' && jobs.aws-terraform-apply.outputs.databricks_workspace_id || jobs.azure-terraform-apply.outputs.databricks_workspace_id }}
       databricks_workspace_url:
-          description: "Databricks workspace URL (AWS or Azure)"
-          value: ${{ inputs.cloud == 'aws' && jobs.aws-terraform-apply.outputs.databricks_workspace_url || jobs.azure-terraform-apply.outputs.databricks_workspace_url }}
+        description: "Databricks Workspace URL (AWS or Azure)"
+        value: ${{ inputs.cloud == 'aws' && jobs.aws-terraform-apply.outputs.databricks_workspace_url || jobs.azure-terraform-apply.outputs.databricks_workspace_url }}
 
 permissions:
   contents: read
   id-token: write
 
 jobs:
+
+################################################################################
+# AWS Terraform Apply
+################################################################################
+
   aws-terraform-apply:
     if: ${{ inputs.cloud == 'aws' }}
     runs-on: ubuntu-latest
     outputs:
+      databricks_workspace_id: ${{ steps.tfApply.outputs.databricks_workspace_id }}
       databricks_workspace_url: ${{ steps.tfApply.outputs.databricks_workspace_url }}
 
     steps:
@@ -157,10 +169,26 @@ jobs:
           -var 'databricks_workspace_endpoint_id=${{ inputs.databricks_workspace_endpoint_id }}' \
           -var 'databricks_relay_endpoint_id=${{ inputs.databricks_relay_endpoint_id }}' 
 
+          echo "databricks_workspace_id=$(terraform output -raw databricks_workspace_id)" >> $GITHUB_OUTPUT
           echo "databricks_workspace_url=$(terraform output -raw databricks_workspace_url)" >> $GITHUB_OUTPUT
 
-      - name: Terraform Apply Databricks
-        if: ${{ inputs.databricks_account_id == '782ba817-b9bf-4033-9aa9-56bb80139fba' && inputs.tf_dir != 'workspace' }}
+      - name: Terraform Apply Databricks Workspace Iam
+        if: ${{ inputs.databricks_account_id == '782ba817-b9bf-4033-9aa9-56bb80139fba' && inputs.tf_dir == 'workspace-iam' }}
+        env:
+          DATABRICKS_HOST: "https://accounts.cloud.databricks.com"
+          DATABRICKS_ACCOUNT_ID: ${{ inputs.databricks_account_id }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.databricks_client_id }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.databricks_client_secret }}
+        run: |
+          cd ${{ inputs.tf_dir }}
+          terraform apply -var-file='${{ inputs.tf_file }}' -auto-approve \
+          -var 'databricks_client_id=${{ secrets.databricks_client_id }}' \
+          -var 'databricks_client_secret=${{ secrets.databricks_client_secret }}' \
+          -var 'databricks_workspace_id=${{ inputs.databricks_workspace_id }}' \
+          -var 'databricks_workspace_url=${{ inputs.databricks_workspace_url }}'
+
+      - name: Terraform Apply Databricks Catalogs
+        if: ${{ inputs.databricks_account_id == '782ba817-b9bf-4033-9aa9-56bb80139fba' && inputs.tf_dir == 'catalogs' }}
         env:
           DATABRICKS_HOST: "https://accounts.cloud.databricks.com"
           DATABRICKS_ACCOUNT_ID: ${{ inputs.databricks_account_id }}
@@ -173,12 +201,31 @@ jobs:
           -var 'databricks_client_secret=${{ secrets.databricks_client_secret }}' \
           -var 'databricks_workspace_url=${{ inputs.databricks_workspace_url }}'
 
+      - name: Terraform Apply Databricks Compute
+        if: ${{ inputs.databricks_account_id == '782ba817-b9bf-4033-9aa9-56bb80139fba' && inputs.tf_dir == 'compute' }}
+        env:
+          DATABRICKS_HOST: "https://accounts.cloud.databricks.com"
+          DATABRICKS_ACCOUNT_ID: ${{ inputs.databricks_account_id }}
+          DATABRICKS_CLIENT_ID: ${{ secrets.databricks_client_id }}
+          DATABRICKS_CLIENT_SECRET: ${{ secrets.databricks_client_secret }}
+        run: |
+          cd ${{ inputs.tf_dir }}
+          terraform apply -var-file='${{ inputs.tf_file }}' -auto-approve \
+          -var 'databricks_client_id=${{ secrets.databricks_client_id }}' \
+          -var 'databricks_client_secret=${{ secrets.databricks_client_secret }}' \
+          -var 'databricks_workspace_url=${{ inputs.databricks_workspace_url }}'
+
+################################################################################
+# Azure Terraform Plan
+################################################################################
+
   azure-terraform-apply:
     runs-on: ubuntu-latest
     if: ${{inputs.cloud=='az'}}
     outputs:
+      databricks_workspace_id: ${{ steps.tfApply.outputs.databricks_workspace_id }}
       databricks_workspace_url: ${{ steps.tfApply.outputs.databricks_workspace_url }}
-      
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -192,17 +239,17 @@ jobs:
           git config --global url."git@github.com:".insteadOf "https://github.com/"
           git config --list
         working-directory: "${{ inputs.tf_dir }}"  
-          
+
       - name: az login
         uses: azure/login@v2
         with:
           client-id: ${{ inputs.azure_client_id }}
           tenant-id: ${{ inputs.azure_tenant_id }}
           subscription-id: ${{ inputs.azure_sub_id }}
-      
+
       - name: az account show
         run: az account show
-  
+
       - name: Configure AWS credentials
         run: aws configure set aws-region ${{ inputs.aws_region }}
 
@@ -233,12 +280,17 @@ jobs:
         run: |
           cd ${{ inputs.tf_dir }}
           terraform apply -var-file=${{ inputs.tf_file }} -auto-approve
-          
-          # Capture workspace URL if available
+
+          # Capture Workspace ID if available
+          if terraform output -json | grep -q "databricks_workspace_id"; then
+            echo "databricks_workspace_id=$(terraform output -raw databricks_workspace_id)" >> $GITHUB_OUTPUT
+          fi
+
+          # Capture Workspace URL if available
           if terraform output -json | grep -q "databricks_workspace_url"; then
             echo "databricks_workspace_url=$(terraform output -raw databricks_workspace_url)" >> $GITHUB_OUTPUT
           fi
-      
+
       - name: Terraform Apply (Non-Workspace)
         if: ${{ inputs.databricks_account_id != '782ba817-b9bf-4033-9aa9-56bb80139fba' && inputs.tf_dir != 'workspace' }}
         run: |
@@ -260,11 +312,12 @@ jobs:
           -var 'databricks_client_secret=${{ secrets.databricks_client_secret }}' \
           -var 'databricks_workspace_endpoint_id=${{ inputs.databricks_workspace_endpoint_id }}' \
           -var 'databricks_relay_endpoint_id=${{ inputs.databricks_relay_endpoint_id }}' 
-          
+    
+          echo "databricks_workspace_id=$(terraform output -raw databricks_workspace_id)" >> $GITHUB_OUTPUT
           echo "databricks_workspace_url=$(terraform output -raw databricks_workspace_url)" >> $GITHUB_OUTPUT
 
       - name: Terraform Apply Databricks
-        if: ${{ inputs.databricks_account_id == 'fe1630db-b2af-4ac1-a394-9f0e33096a57' && inputs.tf_dir != 'workspace' }}
+        if: ${{ inputs.databricks_account_id == 'fe1630db-b2af-4ac1-a394-9f0e33096a57' && inputs.tf_dir == 'workspace-iam' }}
         env:
           DATABRICKS_HOST: "https://accounts.azuredatabricks.net"
           DATABRICKS_ACCOUNT_ID: ${{ inputs.databricks_account_id }}
@@ -275,4 +328,5 @@ jobs:
           terraform apply -var-file='${{ inputs.tf_file }}' -auto-approve \
           -var 'databricks_client_id=${{ secrets.databricks_client_id }}' \
           -var 'databricks_client_secret=${{ secrets.databricks_client_secret }}' \
+          -var 'databricks_workspace_id=${{ inputs.databricks_workspace_id }}' \
           -var 'databricks_workspace_url=${{ inputs.databricks_workspace_url }}'
