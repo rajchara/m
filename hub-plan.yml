@@ -1,0 +1,119 @@
+name: Terraform Plan
+on:
+  # Workflow can be triggered manually
+  workflow_dispatch:
+    inputs:
+      TF_WORKSPACE:
+        type: string
+        description: Which Terraform workspace would you like to deploy?
+        required: true
+  # Trigger on PR events
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  detect-workspace:
+    runs-on: ubuntu-latest
+    outputs:
+      workspace: ${{ steps.detect.outputs.workspace }}
+      tf_dir: ${{ steps.detect.outputs.tf_dir }}
+      tf_file: ${{ steps.detect.outputs.tf_file }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Detect workspace and calculate tf_dir/tf_file
+        id: detect
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            # Manual trigger - use provided workspace
+            WORKSPACE="${{ inputs.TF_WORKSPACE }}"
+            echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+            
+            # Parse the provided workspace to extract tf_dir and tf_file
+            IFS='-' read -r -a parts <<< "$WORKSPACE"
+            TF_DIR="${parts[3]}/${parts[6]}"  # aws/networking
+            ENVIRONMENT="${parts[5]}"          # dev
+            TF_FILE="$ENVIRONMENT.tfvars"      # dev.tfvars
+            
+            echo "tf_dir=$TF_DIR" >> $GITHUB_OUTPUT
+            echo "tf_file=$TF_FILE" >> $GITHUB_OUTPUT
+            
+          else
+            # PR trigger - auto-detect from changes
+            CHANGED_FILES=$(git diff --name-only origin/${{ github.base_ref }}...HEAD)
+            echo "Changed files: $CHANGED_FILES"
+            
+            # Determine folder from changed files
+            FOLDER=""
+            for service in iam networking core; do
+              if echo "$CHANGED_FILES" | grep -q "aws/$service/"; then
+                FOLDER="$service"
+                break
+              fi
+            done
+            
+            if [ -z "$FOLDER" ]; then
+              echo "ERROR: No changes detected in aws/iam/, aws/networking/, or aws/core/ directories"
+              exit 1
+            fi
+            
+            # Create workspace name using your convention
+            WORKSPACE="050752625070-rtlh-di-aws-syd-dev-$FOLDER"
+            TF_DIR="aws/$FOLDER"
+            TF_FILE="dev.tfvars"
+            
+            echo "workspace=$WORKSPACE" >> $GITHUB_OUTPUT
+            echo "tf_dir=$TF_DIR" >> $GITHUB_OUTPUT
+            echo "tf_file=$TF_FILE" >> $GITHUB_OUTPUT
+            
+            echo "Auto-detected folder: $FOLDER"
+            echo "Generated workspace: $WORKSPACE"
+            echo "Terraform directory: $TF_DIR"
+            echo "Terraform file: $TF_FILE"
+          fi
+
+  get-env:
+    needs: [detect-workspace]
+    uses: rio-tinto/rtlh-github-actions/.github/workflows/tf_calc_env.yml@main
+    with:
+      tf-workspace: ${{ needs.detect-workspace.outputs.workspace }}
+      gh_repo: ${{ github.event.repository.name }}
+
+  set-env:
+    runs-on: ubuntu-latest
+    needs: [get-env]
+    environment: ${{ needs.get-env.outputs.environment }}
+    outputs:
+      cloud: ${{ steps.set-env.outputs.cloud }}
+      aws_target_role: ${{ steps.set-env.outputs.aws_target_role }}
+      region: ${{ steps.set-env.outputs.region }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+      
+      - name: Set Env
+        id: set-env
+        run: |
+          echo "${{ needs.get-env.outputs.file }}"
+          echo "cloud=${{ needs.get-env.outputs.cloud }}" >> $GITHUB_OUTPUT
+          echo "aws_target_role=${{ vars.AWS_TARGET_ACCOUNT_ROLE_ARN }}" >> $GITHUB_OUTPUT
+          echo "region=${{ vars.AWS_TARGET_REGION }}" >> $GITHUB_OUTPUT
+
+  call-terraform-plan:
+    needs: [detect-workspace, set-env]
+    uses: rio-tinto/rtlh-github-actions/.github/workflows/tf-plan.yml@main
+    secrets:
+      RIOTINTO_ORG_TOKEN: ${{ secrets.RIOTINTO_ORG_TOKEN }}
+    with:
+      tf_workspace: ${{ needs.detect-workspace.outputs.workspace }}
+      tf_dir: ${{ needs.detect-workspace.outputs.tf_dir }}
+      tf_file: ${{ needs.detect-workspace.outputs.tf_file }}
+      aws_region: ${{ needs.set-env.outputs.region }}
+      gh_repo: ${{ github.event.repository.name }}
+      target_role_arn: ${{ needs.set-env.outputs.aws_target_role }}
+      cloud: ${{ needs.set-env.outputs.cloud }}
