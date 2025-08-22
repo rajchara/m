@@ -1,0 +1,62 @@
+name: Terraform Apply
+run-name: Deploy ${{ inputs.TAG }} to ${{ inputs.TF_WORKSPACE }}
+
+on:
+  # Workflow can be triggered manually
+  workflow_dispatch:
+    inputs:
+      TF_WORKSPACE:
+        type: string
+        description: Which Terraform workspace would you like to deploy?
+        required: true
+      TAG:
+        type: string
+        required: true
+
+jobs:
+  get-env:
+    uses: rio-tinto/rtlh-github-actions/.github/workflows/tf_calc_env.yml@main
+    with:
+      tf-workspace: ${{ inputs.tf_workspace }}
+      gh_repo: ${{ github.event.repository.name }}
+
+  set-env:
+    runs-on: ubuntu-latest
+    needs: [get-env]
+    environment: ${{ needs.get-env.outputs.environment }}
+    outputs:
+      tf_dir: ${{ steps.set-env.outputs.tf_dir }}
+      cloud: ${{ steps.set-env.outputs.cloud }}
+      tf_file: ${{ steps.set-env.outputs.tf_file }}
+      aws_target_role: ${{ steps.set-env.outputs.aws_target_role }}
+      region: ${{ steps.set-env.outputs.region }}
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set Env
+        id: set-env
+        run: |
+          echo "${{ needs.get-env.outputs.file }}"
+          echo "tf_dir=${{ needs.get-env.outputs.tf_dir }}" >> $GITHUB_OUTPUT
+          echo "tf_file=${{needs.get-env.outputs.file }}" >> $GITHUB_OUTPUT
+          echo "cloud=${{ needs.get-env.outputs.cloud }}" >> $GITHUB_OUTPUT
+          echo "aws_target_role=${{ vars.AWS_TARGET_ACCOUNT_ROLE_ARN }}" >> $GITHUB_OUTPUT
+          echo "region=${{ vars.AWS_TARGET_REGION }}" >> $GITHUB_OUTPUT
+
+  call-terraform-apply:
+    needs: [set-env]
+    uses: rio-tinto/rtlh-github-actions/.github/workflows/tf-apply.yml@main
+    secrets:
+      RIOTINTO_ORG_TOKEN: ${{ secrets.RIOTINTO_ORG_TOKEN }}
+    with:
+      tf_workspace: ${{ inputs.TF_WORKSPACE }}
+      aws_region: ${{ needs.set-env.outputs.region }}
+      gh_repo: ${{ github.event.repository.name }}
+      target_role_arn: ${{ needs.set-env.outputs.aws_target_role }}
+      tf_dir: ${{ needs.set-env.outputs.tf_dir }}
+      tf_file: ${{ needs.set-env.outputs.tf_file }}
+      cloud: ${{ needs.set-env.outputs.cloud }}
+      tag: ${{ inputs.TAG }}
